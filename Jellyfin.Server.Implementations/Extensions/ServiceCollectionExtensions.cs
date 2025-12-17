@@ -24,6 +24,7 @@ public static class ServiceCollectionExtensions
     private static IEnumerable<Type> DatabaseProviderTypes()
     {
         yield return typeof(SqliteDatabaseProvider);
+        yield return typeof(Jellyfin.Database.Providers.PostgreSQL.PostgreSQLDatabaseProvider);
     }
 
     private static IDictionary<string, JellyfinDbProviderFactory> GetSupportedDbProviders()
