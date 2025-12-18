@@ -17,7 +17,7 @@ namespace Jellyfin.Database.Implementations.ModelConfiguration
             // Filtered over non-null user ids for when other entities (groups, API keys) get permissions
             builder
                 .HasIndex(p => new { p.UserId, p.Kind })
-                .HasFilter("[UserId] IS NOT NULL")
+                .HasFilter("\"UserId\" IS NOT NULL")
                 .IsUnique();
         }
     }
