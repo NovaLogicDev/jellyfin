@@ -51,7 +51,9 @@ public sealed class PostgreSQLDatabaseProvider : IJellyfinDatabaseProvider
             Port = GetOption(customOptions, "port", int.Parse, () => 5432),
             Database = GetOption(customOptions, "database", s => s, () => "jellyfin"),
             Username = GetOption(customOptions, "username", s => s, () => "jellyfin"),
-            Password = GetOption(customOptions, "password", s => s, () => "jellyfin")
+            Password = GetOption(customOptions, "password", s => s, () => "jellyfin"),
+            PgDumpPath = GetOption(customOptions, "pg_dump_path", s => s, () => "pg_dump"),
+            PgRestorePath = GetOption(customOptions, "pg_restore_path", s => s, () => "pg_restore")
         };
 
         var connectionStringBuilder = new NpgsqlConnectionStringBuilder();
@@ -121,7 +123,20 @@ public sealed class PostgreSQLDatabaseProvider : IJellyfinDatabaseProvider
 
         _logger.LogInformation("Creating PostgreSQL backup at {Path}", backupFile);
 
-        RunProcess("pg_dump", $"-h {_connectionInfo.Host} -p {_connectionInfo.Port} -U {_connectionInfo.Username} -F c -b -v -f \"{backupFile}\" {_connectionInfo.Database}", _connectionInfo.Password);
+        try
+        {
+            RunProcess(_connectionInfo.PgDumpPath, $"-h {_connectionInfo.Host} -p {_connectionInfo.Port} -U {_connectionInfo.Username} -F c -b -v -f \"{backupFile}\" {_connectionInfo.Database}", _connectionInfo.Password);
+        }
+        catch (System.ComponentModel.Win32Exception ex)
+        {
+            _logger.LogWarning(ex, "Failed to run pg_dump. Backup skipped. Ensure pg_dump is installed or configured correctly.");
+            return Task.FromResult("SKIPPED");
+        }
+        catch (InvalidOperationException ex)
+        {
+            _logger.LogError(ex, "pg_dump failed execution.");
+            throw; // Re-throw if it ran but failed
+        }
 
         return Task.FromResult(key);
     }
@@ -129,6 +144,12 @@ public sealed class PostgreSQLDatabaseProvider : IJellyfinDatabaseProvider
     /// <inheritdoc />
     public Task RestoreBackupFast(string key, CancellationToken cancellationToken)
     {
+        if (string.Equals(key, "SKIPPED", StringComparison.OrdinalIgnoreCase))
+        {
+            _logger.LogInformation("Skipping restore because backup was skipped.");
+            return Task.CompletedTask;
+        }
+
         var backupFile = Path.Combine(_appPaths.DataPath, "backups", $"{key}_jellyfin.dump");
 
         if (!File.Exists(backupFile))
@@ -140,7 +161,15 @@ public sealed class PostgreSQLDatabaseProvider : IJellyfinDatabaseProvider
         _logger.LogInformation("Restoring PostgreSQL backup from {Path}", backupFile);
 
         // -c: Clean (drop) database objects before creating them
-        RunProcess("pg_restore", $"-h {_connectionInfo.Host} -p {_connectionInfo.Port} -U {_connectionInfo.Username} -d {_connectionInfo.Database} -c -v \"{backupFile}\"", _connectionInfo.Password);
+        try
+        {
+            RunProcess(_connectionInfo.PgRestorePath, $"-h {_connectionInfo.Host} -p {_connectionInfo.Port} -U {_connectionInfo.Username} -d {_connectionInfo.Database} -c -v \"{backupFile}\"", _connectionInfo.Password);
+        }
+        catch (System.ComponentModel.Win32Exception ex)
+        {
+            _logger.LogCritical(ex, "Failed to run pg_restore. Restore failed. Ensure pg_restore is installed or configured correctly.");
+            throw;
+        }
 
         return Task.CompletedTask;
     }
@@ -148,6 +177,11 @@ public sealed class PostgreSQLDatabaseProvider : IJellyfinDatabaseProvider
     /// <inheritdoc />
     public Task DeleteBackup(string key)
     {
+        if (string.Equals(key, "SKIPPED", StringComparison.OrdinalIgnoreCase))
+        {
+            return Task.CompletedTask;
+        }
+
         var backupFile = Path.Combine(_appPaths.DataPath, "backups", $"{key}_jellyfin.dump");
 
         if (!File.Exists(backupFile))
@@ -215,5 +249,9 @@ public sealed class PostgreSQLDatabaseProvider : IJellyfinDatabaseProvider
         public string Username { get; set; } = string.Empty;
 
         public string Password { get; set; } = string.Empty;
+
+        public string PgDumpPath { get; set; } = "pg_dump";
+
+        public string PgRestorePath { get; set; } = "pg_restore";
     }
 }
