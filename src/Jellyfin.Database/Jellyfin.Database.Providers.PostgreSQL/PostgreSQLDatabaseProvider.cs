@@ -1,11 +1,15 @@
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
+using System.Globalization;
+using System.IO;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using Jellyfin.Database.Implementations;
 using Jellyfin.Database.Implementations.DbConfiguration;
 using MediaBrowser.Common.Configuration;
+using MediaBrowser.Model.Configuration;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging;
 using Npgsql;
@@ -19,14 +23,18 @@ namespace Jellyfin.Database.Providers.PostgreSQL;
 public sealed class PostgreSQLDatabaseProvider : IJellyfinDatabaseProvider
 {
     private readonly ILogger<PostgreSQLDatabaseProvider> _logger;
+    private readonly IApplicationPaths _appPaths;
+    private ConnectionInfo _connectionInfo = new();
 
     /// <summary>
     /// Initializes a new instance of the <see cref="PostgreSQLDatabaseProvider"/> class.
     /// </summary>
     /// <param name="logger">A logger.</param>
-    public PostgreSQLDatabaseProvider(ILogger<PostgreSQLDatabaseProvider> logger)
+    /// <param name="appPaths">The application paths.</param>
+    public PostgreSQLDatabaseProvider(ILogger<PostgreSQLDatabaseProvider> logger, IApplicationPaths appPaths)
     {
         _logger = logger;
+        _appPaths = appPaths;
     }
 
     /// <inheritdoc/>
@@ -35,32 +43,23 @@ public sealed class PostgreSQLDatabaseProvider : IJellyfinDatabaseProvider
     /// <inheritdoc/>
     public void Initialise(DbContextOptionsBuilder options, DatabaseConfigurationOptions databaseConfiguration)
     {
-        static T? GetOption<T>(ICollection<CustomDatabaseOption>? options, string key, Func<string, T> converter, Func<T>? defaultValue = null)
-        {
-            if (options is null)
-            {
-                return defaultValue is not null ? defaultValue() : default;
-            }
-
-            var value = options.FirstOrDefault(e => e.Key.Equals(key, StringComparison.OrdinalIgnoreCase));
-            if (value is null)
-            {
-                return defaultValue is not null ? defaultValue() : default;
-            }
-
-            return converter(value.Value);
-        }
-
         var customOptions = databaseConfiguration.CustomProviderOptions?.Options;
 
+        _connectionInfo = new ConnectionInfo
+        {
+            Host = GetOption(customOptions, "host", s => s, () => "localhost"),
+            Port = GetOption(customOptions, "port", int.Parse, () => 5432),
+            Database = GetOption(customOptions, "database", s => s, () => "jellyfin"),
+            Username = GetOption(customOptions, "username", s => s, () => "jellyfin"),
+            Password = GetOption(customOptions, "password", s => s, () => "jellyfin")
+        };
+
         var connectionStringBuilder = new NpgsqlConnectionStringBuilder();
-        // Basic connection parameters - assuming they are passed via custom options or env vars for now.
-        // In a real scenario, we might want to map these from specific config fields.
-        connectionStringBuilder.Host = GetOption(customOptions, "host", s => s, () => "localhost");
-        connectionStringBuilder.Port = GetOption(customOptions, "port", int.Parse, () => 5432);
-        connectionStringBuilder.Database = GetOption(customOptions, "database", s => s, () => "jellyfin");
-        connectionStringBuilder.Username = GetOption(customOptions, "username", s => s, () => "jellyfin");
-        connectionStringBuilder.Password = GetOption(customOptions, "password", s => s, () => "jellyfin");
+        connectionStringBuilder.Host = _connectionInfo.Host;
+        connectionStringBuilder.Port = _connectionInfo.Port;
+        connectionStringBuilder.Database = _connectionInfo.Database;
+        connectionStringBuilder.Username = _connectionInfo.Username;
+        connectionStringBuilder.Password = _connectionInfo.Password;
 
         var connectionString = connectionStringBuilder.ToString();
 
@@ -69,6 +68,22 @@ public sealed class PostgreSQLDatabaseProvider : IJellyfinDatabaseProvider
         options.UseNpgsql(
             connectionString,
             npgsqlOptions => npgsqlOptions.MigrationsAssembly(GetType().Assembly));
+    }
+
+    private static T GetOption<T>(ICollection<CustomDatabaseOption>? options, string key, Func<string, T> converter, Func<T>? defaultValue = null)
+    {
+        if (options is null)
+        {
+            return defaultValue is not null ? defaultValue() : default!;
+        }
+
+        var value = options.FirstOrDefault(e => e.Key.Equals(key, StringComparison.OrdinalIgnoreCase));
+        if (value is null)
+        {
+            return defaultValue is not null ? defaultValue() : default!;
+        }
+
+        return converter(value.Value);
     }
 
     /// <inheritdoc/>
@@ -99,19 +114,78 @@ public sealed class PostgreSQLDatabaseProvider : IJellyfinDatabaseProvider
     /// <inheritdoc />
     public Task<string> MigrationBackupFast(CancellationToken cancellationToken)
     {
-        throw new NotSupportedException("Fast backup is not supported for PostgreSQL provider.");
+        var key = DateTime.UtcNow.ToString("yyyyMMddHHmmss", CultureInfo.InvariantCulture);
+        var backupFolder = Path.Combine(_appPaths.DataPath, "backups");
+        Directory.CreateDirectory(backupFolder);
+        var backupFile = Path.Combine(backupFolder, $"{key}_jellyfin.dump");
+
+        _logger.LogInformation("Creating PostgreSQL backup at {Path}", backupFile);
+
+        RunProcess("pg_dump", $"-h {_connectionInfo.Host} -p {_connectionInfo.Port} -U {_connectionInfo.Username} -F c -b -v -f \"{backupFile}\" {_connectionInfo.Database}", _connectionInfo.Password);
+
+        return Task.FromResult(key);
     }
 
     /// <inheritdoc />
     public Task RestoreBackupFast(string key, CancellationToken cancellationToken)
     {
-        throw new NotSupportedException("Fast restore is not supported for PostgreSQL provider.");
+        var backupFile = Path.Combine(_appPaths.DataPath, "backups", $"{key}_jellyfin.dump");
+
+        if (!File.Exists(backupFile))
+        {
+            _logger.LogCritical("Tried to restore a backup that does not exist: {Key}", key);
+            return Task.CompletedTask;
+        }
+
+        _logger.LogInformation("Restoring PostgreSQL backup from {Path}", backupFile);
+
+        // -c: Clean (drop) database objects before creating them
+        RunProcess("pg_restore", $"-h {_connectionInfo.Host} -p {_connectionInfo.Port} -U {_connectionInfo.Username} -d {_connectionInfo.Database} -c -v \"{backupFile}\"", _connectionInfo.Password);
+
+        return Task.CompletedTask;
     }
 
     /// <inheritdoc />
     public Task DeleteBackup(string key)
     {
-        throw new NotSupportedException("Backup deletion is not supported for PostgreSQL provider.");
+        var backupFile = Path.Combine(_appPaths.DataPath, "backups", $"{key}_jellyfin.dump");
+
+        if (!File.Exists(backupFile))
+        {
+            _logger.LogCritical("Tried to delete a backup that does not exist: {Key}", key);
+            return Task.CompletedTask;
+        }
+
+        File.Delete(backupFile);
+        return Task.CompletedTask;
+    }
+
+    private void RunProcess(string fileName, string arguments, string password)
+    {
+        var startInfo = new ProcessStartInfo
+        {
+            FileName = fileName,
+            Arguments = arguments,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            UseShellExecute = false,
+            CreateNoWindow = true
+        };
+
+        if (!string.IsNullOrEmpty(password))
+        {
+            startInfo.EnvironmentVariables["PGPASSWORD"] = password;
+        }
+
+        using var process = new Process { StartInfo = startInfo };
+        process.Start();
+        process.WaitForExit();
+
+        if (process.ExitCode != 0)
+        {
+            var error = process.StandardError.ReadToEnd();
+            throw new InvalidOperationException($"{fileName} failed with exit code {process.ExitCode}: {error}");
+        }
     }
 
     /// <inheritdoc/>
@@ -128,5 +202,18 @@ public sealed class PostgreSQLDatabaseProvider : IJellyfinDatabaseProvider
         var deleteAllQuery = string.Join('\n', deleteQueries);
 
         await dbContext.Database.ExecuteSqlRawAsync(deleteAllQuery).ConfigureAwait(false);
+    }
+
+    private class ConnectionInfo
+    {
+        public string Host { get; set; } = string.Empty;
+
+        public int Port { get; set; }
+
+        public string Database { get; set; } = string.Empty;
+
+        public string Username { get; set; } = string.Empty;
+
+        public string Password { get; set; } = string.Empty;
     }
 }

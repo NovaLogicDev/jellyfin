@@ -27,7 +27,50 @@ internal sealed class PostgreSQLDesignTimeDbContextFactory : IDesignTimeDbContex
         return new JellyfinDbContext(
             optionsBuilder.Options,
             NullLogger<JellyfinDbContext>.Instance,
-            new PostgreSQLDatabaseProvider(NullLogger<PostgreSQLDatabaseProvider>.Instance),
+            new PostgreSQLDatabaseProvider(NullLogger<PostgreSQLDatabaseProvider>.Instance, new MockApplicationPaths()),
             new NoLockBehavior(NullLogger<NoLockBehavior>.Instance));
+    }
+
+    private class MockApplicationPaths : MediaBrowser.Common.Configuration.IApplicationPaths
+    {
+        public string ProgramDataPath => string.Empty;
+
+        public string ProgramSystemPath => string.Empty;
+
+        public string DataPath => string.Empty;
+
+        public string ImageCachePath => string.Empty;
+
+        public string PluginsPath => string.Empty;
+
+        public string PluginConfigurationsPath => string.Empty;
+
+        public string TempUpdatePath => string.Empty;
+
+        public string LogDirectoryPath => string.Empty;
+
+        public string ConfigurationDirectoryPath => string.Empty;
+
+        public string SystemConfigurationFilePath => string.Empty;
+
+        public string CachePath => string.Empty;
+
+        public string TempDirectory => string.Empty;
+
+        public string WebPath => string.Empty;
+
+        public string VirtualDataPath => string.Empty;
+
+        public string TrickplayPath => string.Empty;
+
+        public string BackupPath => string.Empty;
+
+        public void MakeSanityCheckOrThrow()
+        {
+        }
+
+        public void CreateAndCheckMarker(string markerName, string path, bool isFile)
+        {
+        }
     }
 }
